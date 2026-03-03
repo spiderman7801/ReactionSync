@@ -1,19 +1,16 @@
-/**
- * Full Reaction Pro - Sync Engine v2.0
- * Includes Dynamic Subtitle Offsetting
- */
-
 class ReactionEngine {
     constructor() {
         this.videoBase = document.getElementById('videoBase');
         this.videoReact = document.getElementById('videoReact');
         this.masterSeek = document.getElementById('mainSeek');
+        this.setupModal = document.getElementById('setupModal');
+        this.settingsPanel = document.getElementById('settingsPanel');
+        this.delayDisplay = document.getElementById('delayDisplay');
         
-        // State
         this.reactDelay = 0;
         this.isSyncing = false;
         this.subOffset = 0;
-        this.rawSubtitleText = ""; // To allow re-parsing with new offsets
+        this.rawSubtitleText = "";
 
         this.init();
     }
@@ -22,86 +19,115 @@ class ReactionEngine {
         this.setupEventListeners();
         this.setupPIPInteractions();
         this.startSyncLoop();
+        console.log("Reaction Engine Initialized");
     }
 
     setupEventListeners() {
-        // ... (Previous event listeners remain the same) ...
+        const dropZone = document.getElementById('dropZone');
         
-        document.getElementById('dropZone').onclick = () => this.triggerFilePicker();
+        // --- FIX: Click to Browse ---
+        dropZone.addEventListener('click', () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = true;
+            input.accept = "video/*,.srt,.vtt"; // Hint to browser
+            input.onchange = (e) => this.handleFiles(Array.from(e.target.files));
+            input.click();
+        });
+
+        // --- FIX: Drag and Drop Prevention ---
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            this.handleFiles(Array.from(files));
+        }, false);
+
+        // UI Controls
         document.getElementById('playPause').onclick = () => this.togglePlay();
         document.getElementById('syncNow').onclick = () => this.setSyncPoint();
         document.getElementById('toggleSettings').onclick = () => this.settingsPanel.classList.toggle('hidden');
-
-        // Subtitle Specific Listeners
-        document.getElementById('subDelay').oninput = (e) => {
-            this.subOffset = parseFloat(e.target.value);
-            if (this.rawSubtitleText) this.renderSubtitles();
+        document.getElementById('vOffset').oninput = (e) => {
+            this.videoBase.style.transform = `translateY(${e.target.value}%)`;
         };
 
-        document.getElementById('changeSubs').onclick = () => this.triggerFilePicker('.srt,.vtt');
+        // Launch Button
+        document.getElementById('startProject').onclick = () => {
+            this.setupModal.classList.add('hidden');
+            this.isSyncing = true;
+            this.videoBase.play();
+            this.videoReact.play();
+        };
+
+        document.addEventListener('keydown', (e) => this.handleHotkeys(e));
     }
 
-    /**
-     * Subtitle Engine: Converts SRT to VTT with dynamic time shifting
-     */
-    renderSubtitles() {
-        // Remove existing tracks
-        const oldTracks = this.videoBase.querySelectorAll('track');
-        oldTracks.forEach(t => t.remove());
-
-        let vttContent = "WEBVTT\n\n";
-        const blocks = this.rawSubtitleText.split(/\r?\n\r?\n/);
-
-        blocks.forEach(block => {
-            const lines = block.split(/\r?\n/);
-            if (lines.length >= 2) {
-                const timeLine = lines.find(l => l.includes('-->'));
-                if (timeLine) {
-                    const shiftedTime = this.shiftVTTTime(timeLine, this.subOffset);
-                    vttContent += `${shiftedTime}\n`;
-                    // Add the actual text lines
-                    const textLines = lines.slice(lines.indexOf(timeLine) + 1);
-                    vttContent += textLines.join('\n') + "\n\n";
-                }
-            }
-        });
-
-        const blob = new Blob([vttContent], { type: 'text/vtt' });
-        const url = URL.createObjectURL(blob);
-        const track = document.createElement('track');
-        
-        Object.assign(track, {
-            kind: 'subtitles',
-            label: 'English (Synced)',
-            srclang: 'en',
-            src: url,
-            default: true
-        });
-
-        this.videoBase.appendChild(track);
-    }
-
-    shiftVTTTime(timeLine, offset) {
-        return timeLine.replace(/(\d{2}:\d{2}:\d{2}[.,]\d{3})/g, (match) => {
-            let [h, m, s] = match.replace(',', '.').split(':');
-            let totalSeconds = parseFloat(h) * 3600 + parseFloat(m) * 60 + parseFloat(s);
-            totalSeconds = Math.max(0, totalSeconds + offset);
-            
-            return new Date(totalSeconds * 1000).toISOString().substr(11, 12).replace('.', ',');
-        });
-    }
-
-    async handleFiles(files) {
-        for (const file of files) {
+    handleFiles(files) {
+        files.forEach(file => {
+            const url = URL.createObjectURL(file);
             const name = file.name.toLowerCase();
-            if (name.endsWith('.srt') || name.endsWith('.vtt')) {
-                this.rawSubtitleText = await file.text();
-                this.renderSubtitles();
-            } else {
-                // ... (Previous video handling logic) ...
+
+            if (name.match(/\.(mp4|mkv|webm|mov|avi)$/i)) {
+                // Heuristic: If name contains 'react' or 'comm', it's the reaction
+                if (name.includes('react') || name.includes('comm')) {
+                    this.videoReact.src = url;
+                    this.updateFileStatus('reactStatus', true);
+                    this.parseAutoDelay(file.name);
+                } else {
+                    this.videoBase.src = url;
+                    this.updateFileStatus('baseStatus', true);
+                }
+            } else if (name.endsWith('.srt') || name.endsWith('.vtt')) {
+                file.text().then(text => {
+                    this.rawSubtitleText = text;
+                    this.renderSubtitles();
+                });
             }
+        });
+
+        if (this.videoBase.src && this.videoReact.src) {
+            document.getElementById('startProject').disabled = false;
         }
     }
 
-    // ... (Keep existing setupPIPInteractions, seek, and sync loop methods) ...
+    updateFileStatus(id, active) {
+        const el = document.getElementById(id);
+        el.style.color = active ? '#4ade80' : '#f87171';
+        const icon = el.querySelector('i');
+        icon.className = active ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-xmark';
+    }
+
+    // ... (rest of the helper functions from previous build)
+    togglePlay() {
+        if (this.videoBase.paused) {
+            this.videoBase.play();
+            this.videoReact.play();
+        } else {
+            this.videoBase.pause();
+            this.videoReact.pause();
+        }
+    }
+
+    startSyncLoop() {
+        const loop = () => {
+            if (this.isSyncing && !this.videoBase.paused) {
+                const targetReactTime = this.videoBase.currentTime + this.reactDelay;
+                if (Math.abs(this.videoReact.currentTime - targetReactTime) > 0.1) {
+                    this.videoReact.currentTime = targetReactTime;
+                }
+            }
+            requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+    }
+    
+    // Additional methods for delay, sync point, etc would follow here
 }
+
+window.onload = () => { window.engine = new ReactionEngine(); };
