@@ -16,53 +16,56 @@ class ReactionEngine {
     }
 
     init() {
+        this.setupGlobalDragDrop();
         this.setupEventListeners();
         this.setupPIPInteractions();
         this.startSyncLoop();
-        console.log("Reaction Engine Initialized");
+        console.log("Reaction Engine: Ready for files.");
+    }
+
+    // --- FIX 1: Hijack the entire window to prevent "opening" files ---
+    setupGlobalDragDrop() {
+        window.addEventListener("dragover", (e) => e.preventDefault(), false);
+        window.addEventListener("drop", (e) => e.preventDefault(), false);
     }
 
     setupEventListeners() {
         const dropZone = document.getElementById('dropZone');
         
-        // --- FIX: Click to Browse ---
+        // --- FIX 2: More reliable click-to-browse ---
         dropZone.addEventListener('click', () => {
             const input = document.createElement('input');
             input.type = 'file';
             input.multiple = true;
-            input.accept = "video/*,.srt,.vtt"; // Hint to browser
-            input.onchange = (e) => this.handleFiles(Array.from(e.target.files));
+            input.accept = "video/*,.srt,.vtt"; 
+            input.onchange = (e) => {
+                if (e.target.files.length > 0) {
+                    this.handleFiles(Array.from(e.target.files));
+                }
+            };
             input.click();
         });
 
-        // --- FIX: Drag and Drop Prevention ---
-        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-            dropZone.addEventListener(eventName, (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-            }, false);
+        // Handle specific drop zone events
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                this.handleFiles(Array.from(files));
+            }
         });
 
-        dropZone.addEventListener('drop', (e) => {
-            const dt = e.dataTransfer;
-            const files = dt.files;
-            this.handleFiles(Array.from(files));
-        }, false);
-
-        // UI Controls
+        // Master UI Controls
         document.getElementById('playPause').onclick = () => this.togglePlay();
         document.getElementById('syncNow').onclick = () => this.setSyncPoint();
         document.getElementById('toggleSettings').onclick = () => this.settingsPanel.classList.toggle('hidden');
-        document.getElementById('vOffset').oninput = (e) => {
-            this.videoBase.style.transform = `translateY(${e.target.value}%)`;
-        };
-
-        // Launch Button
+        
         document.getElementById('startProject').onclick = () => {
             this.setupModal.classList.add('hidden');
             this.isSyncing = true;
-            this.videoBase.play();
-            this.videoReact.play();
+            // Interaction to unlock audio
+            this.videoBase.play().catch(e => console.log("Autoplay blocked, waiting for user."));
+            this.videoReact.play().catch(e => console.log("Autoplay blocked."));
         };
 
         document.addEventListener('keydown', (e) => this.handleHotkeys(e));
@@ -73,17 +76,22 @@ class ReactionEngine {
             const url = URL.createObjectURL(file);
             const name = file.name.toLowerCase();
 
+            // Video detection
             if (name.match(/\.(mp4|mkv|webm|mov|avi)$/i)) {
-                // Heuristic: If name contains 'react' or 'comm', it's the reaction
+                // Heuristic: Check if user named it "react" or similar
                 if (name.includes('react') || name.includes('comm')) {
                     this.videoReact.src = url;
+                    this.videoReact.load();
                     this.updateFileStatus('reactStatus', true);
                     this.parseAutoDelay(file.name);
                 } else {
                     this.videoBase.src = url;
+                    this.videoBase.load();
                     this.updateFileStatus('baseStatus', true);
                 }
-            } else if (name.endsWith('.srt') || name.endsWith('.vtt')) {
+            } 
+            // Subtitle detection
+            else if (name.endsWith('.srt') || name.endsWith('.vtt')) {
                 file.text().then(text => {
                     this.rawSubtitleText = text;
                     this.renderSubtitles();
@@ -91,19 +99,22 @@ class ReactionEngine {
             }
         });
 
+        // Unlock Launch Button
         if (this.videoBase.src && this.videoReact.src) {
-            document.getElementById('startProject').disabled = false;
+            const startBtn = document.getElementById('startProject');
+            startBtn.disabled = false;
+            startBtn.style.background = "#3b82f6"; // Visual feedback
         }
     }
 
     updateFileStatus(id, active) {
         const el = document.getElementById(id);
+        if (!el) return;
         el.style.color = active ? '#4ade80' : '#f87171';
         const icon = el.querySelector('i');
-        icon.className = active ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-xmark';
+        if (icon) icon.className = active ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-xmark';
     }
 
-    // ... (rest of the helper functions from previous build)
     togglePlay() {
         if (this.videoBase.paused) {
             this.videoBase.play();
@@ -114,20 +125,55 @@ class ReactionEngine {
         }
     }
 
+    setSyncPoint() {
+        this.reactDelay = this.videoReact.currentTime - this.videoBase.currentTime;
+        this.delayDisplay.innerText = `${this.reactDelay.toFixed(2)}s`;
+    }
+
     startSyncLoop() {
         const loop = () => {
             if (this.isSyncing && !this.videoBase.paused) {
-                const targetReactTime = this.videoBase.currentTime + this.reactDelay;
-                if (Math.abs(this.videoReact.currentTime - targetReactTime) > 0.1) {
-                    this.videoReact.currentTime = targetReactTime;
+                const targetTime = this.videoBase.currentTime + this.reactDelay;
+                const drift = Math.abs(this.videoReact.currentTime - targetTime);
+                if (drift > 0.1) {
+                    this.videoReact.currentTime = targetTime;
                 }
             }
             requestAnimationFrame(loop);
         };
         requestAnimationFrame(loop);
     }
-    
-    // Additional methods for delay, sync point, etc would follow here
+
+    setupPIPInteractions() {
+        // Ensure interact.js is loaded in index.html for this to work
+        if (typeof interact !== 'undefined') {
+            interact('#pipContainer').draggable({
+                listeners: {
+                    move(event) {
+                        const target = event.target;
+                        const x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
+                        const y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
+                        target.style.transform = `translate(${x}px, ${y}px)`;
+                        target.setAttribute('data-x', x);
+                        target.setAttribute('data-y', y);
+                    }
+                }
+            });
+        }
+    }
+
+    parseAutoDelay(filename) {
+        const match = filename.match(/\.dt(\d+)/);
+        if (match) {
+            this.reactDelay = parseFloat(match[1]) / 10;
+            this.delayDisplay.innerText = `${this.reactDelay.toFixed(2)}s`;
+        }
+    }
+
+    handleHotkeys(e) {
+        if (e.code === 'Space') { e.preventDefault(); this.togglePlay(); }
+        if (e.code === 'KeyS') this.setSyncPoint();
+    }
 }
 
 window.onload = () => { window.engine = new ReactionEngine(); };
